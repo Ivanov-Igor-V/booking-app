@@ -93,4 +93,15 @@ The author implements small tasks with clear acceptance criteria. Review covers 
 
 ## Running locally
 
+### Python editor tooling
+
+Open the repository folder in VS Code and install the recommended **Ruff**
+extension (`charliermarsh.ruff`). It bundles Ruff, so no pip installation is
+required for editor checks. Python files are checked as you edit; saving with
+Ctrl+S formats code, applies safe lint fixes, and organizes imports. Remaining
+issues appear in the Problems panel (Ctrl+Shift+M).
+
+Rules are configured in `pyproject.toml`; workspace editor settings are in
+`.vscode/settings.json`.
+
 Application code is not available yet. Verified setup instructions will be added with the first Django implementation.
