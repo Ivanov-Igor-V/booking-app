@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Job Atlas</title>
+</head>
+<body>
+    <h1>Developer vacancies</h1>
+
+    <ul>
+        {% for job in jobs %}
+            <li>{{ job.title }} — {{ job.company_name }}</li>
+        {% empty %}
+            <li>No jobs found</li>
+        {% endfor %}
+    </ul>
+    <p>Всего {{ jobs|length }} вакансий</p>
+    <a href="{% url 'about' %}">about</a>
+</body>
+</html>
