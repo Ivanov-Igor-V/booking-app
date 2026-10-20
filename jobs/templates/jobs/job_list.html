@@ -6,10 +6,17 @@
 </head>
 <body>
     <h1>Developer vacancies</h1>
+    <form method="get">
+        <input type="search" name="q" value="{{ keyword }}">
+        <button type="submit">Search</button>
+    </form>
 
     <ul>
         {% for job in jobs %}
-            <li>{{ job.title }} — {{ job.company_name }}</li>
+            <li>
+                <p>{{ job.title }} — {{ job.company_name }} {{ job.publication_date|date:"d.m.Y H:i" }}</p>
+                <p><a href="{{ job.original_url }}">link</a></p>
+            </li>
         {% empty %}
             <li>No jobs found</li>
         {% endfor %}

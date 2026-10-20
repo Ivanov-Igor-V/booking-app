@@ -1,12 +1,11 @@
 from django.http import HttpResponse
 from django.shortcuts import render
 
+from .models import Job
+
 
 def job_list(request):
-    vacancies = [
-        {"title": "Python Developer", "company_name": "ACME"},
-        {"title": "Django Developer", "company_name": "Example"},
-    ]
+    vacancies = Job.objects.order_by("-publication_date", "-id")
     return render(request, "jobs/job_list.html", {"jobs": vacancies})
 
 
