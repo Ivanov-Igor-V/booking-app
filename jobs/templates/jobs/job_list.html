@@ -7,7 +7,8 @@
 <body>
     <h1>Developer vacancies</h1>
     <form method="get">
-        <input type="search" name="q" value="{{ keyword }}">
+        <label for="job-search">Search by title or company</label>
+        <input id="job-search" type="search" name="q" value="{{ keyword }}">
         <button type="submit">Search</button>
     </form>
 
