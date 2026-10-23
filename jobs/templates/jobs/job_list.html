@@ -1,10 +1,9 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Job Atlas</title>
-</head>
-<body>
+{% extends "jobs/base.html" %}
+
+{% block title %}Developer vacancies — Job Atlas{% endblock %}
+
+{% block content %}
+<div>
     <h1>Developer vacancies</h1>
     <form method="get">
         <label for="job-search">Search by title or company</label>
@@ -15,14 +14,25 @@
     <ul>
         {% for job in jobs %}
             <li>
-                <p>{{ job.title }} — {{ job.company_name }} {{ job.publication_date|date:"d.m.Y H:i" }}</p>
-                <p><a href="{{ job.original_url }}">link</a></p>
+                <span>{{ job.title }} — {{ job.company_name }} {{ job.publication_date|date:"d.m.Y H:i" }}</span>
+                <a href="{% url 'job_detail' job.pk %}">{{ job.title }}</a>
             </li>
         {% empty %}
             <li>No jobs found</li>
         {% endfor %}
     </ul>
-    <p>Всего {{ jobs|length }} вакансий</p>
-    <a href="{% url 'about' %}">about</a>
-</body>
-</html>
+
+    <p>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</p>
+    {% if page_obj.has_previous %}
+    <a href="?q={{ keyword|urlencode }}&amp;page={{ page_obj.previous_page_number }}">
+        Previous
+    </a>
+    {% endif %}
+    {% if page_obj.has_next %}
+    <a href="?q={{ keyword|urlencode }}&amp;page={{ page_obj.next_page_number }}">
+        Next
+    </a>
+    {% endif %}
+    <p>Всего {{ page_obj.paginator.count }} вакансий</p>
+</div>
+{% endblock %}
