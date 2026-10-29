@@ -2,6 +2,7 @@ from django.core.paginator import Paginator
 from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, render
+from django.utils.html import format_html
 
 from .models import Job
 
@@ -23,8 +24,8 @@ def job_list(request):
     )
 
 
-def jobs_about(request):
-    return HttpResponse("<strong>Job Atlas collects developer vacancies</strong>")
+def jobs_about(request, test):
+    return HttpResponse(format_html("<p>Job Atlas: {}</p>", test))
 
 
 def job_detail(request, pk):

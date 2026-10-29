@@ -1,0 +1,8 @@
+{% extends "jobs/base.html" %} {% block title %}Home
+Atlas{% endblock %} {% block content %}
+<main class="container">
+    <h1>Find your next developer job</h1>
+    <p>Explore developer vacancies in one place.</p>
+    <a href="{% url 'job_list' %}">Browse jobs →</a>
+</main>
+{% endblock %}

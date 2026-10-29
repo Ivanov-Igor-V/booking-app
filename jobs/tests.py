@@ -1,10 +1,11 @@
 from datetime import timedelta
 
+from django.db.models.deletion import ProtectedError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import Job
+from .models import Job, Source
 
 
 class JobSearchTests(TestCase):
@@ -180,3 +181,66 @@ class JobDetailTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "First line<br>Second line")
+
+
+class SouceTests(TestCase):
+    def test_source_cannot_remove(self):
+        source = Source.objects.create(
+            name="Test Source",
+            website="https://example.com/",
+        )
+
+        Job.objects.create(
+            title=f"Python Developer {1}",
+            company_name="ACME",
+            original_url=f"https://example.com/jobs/{1}",
+            publication_date=timezone.now() + timedelta(minutes=1),
+            source=source,
+        )
+        with self.assertRaises(ProtectedError):
+            source.delete()
+
+    def test_source_removes_if_not_used(self):
+        source = Source.objects.create(
+            name="Test Source",
+            website="https://example.com/",
+        )
+        id = source.pk
+        source.delete()
+        self.assertFalse(Source.objects.filter(pk=id).exists())
+
+    def test_source_len_of_vacs(self):
+        source = Source.objects.create(
+            name="Test Source 1",
+            website="https://example.com/",
+        )
+        source2 = Source.objects.create(
+            name="Test Source 2",
+            website="https://example2.com/",
+        )
+        job1 = Job.objects.create(
+            title="Python Developer 1",
+            company_name="ACME",
+            original_url=f"https://example.com/jobs/{1}",
+            publication_date=timezone.now() + timedelta(minutes=1),
+            source=source,
+        )
+        job2 = Job.objects.create(
+            title="Python Developer 2",
+            company_name="ACME",
+            original_url=f"https://example.com/jobs/{2}",
+            publication_date=timezone.now() + timedelta(minutes=1),
+            source=source2,
+        )
+        job3 = Job.objects.create(
+            title="Python Developer 3",
+            company_name="ACME",
+            original_url="https://example.com/jobs/3",
+            publication_date=timezone.now() + timedelta(minutes=1),
+            source=source,
+        )
+        self.assertCountEqual(source.jobs.all(), [job1, job3])
+        self.assertCountEqual(source2.jobs.all(), [job2])
+
+        self.assertEqual(job1.source, source)
+        self.assertEqual(job1.source_id, source.pk)
