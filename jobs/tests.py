@@ -1,11 +1,13 @@
 from datetime import timedelta
 
+from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import Job, Source
+from .services import save_imported_job
 
 
 class JobSearchTests(TestCase):
@@ -244,3 +246,82 @@ class SouceTests(TestCase):
 
         self.assertEqual(job1.source, source)
         self.assertEqual(job1.source_id, source.pk)
+
+
+class ImportedJobTests(TestCase):
+    def setUp(self):
+        self.source = Source.objects.create(
+            name="Test Source", website="https://example.com/"
+        )
+        self.data = {
+            "title": "Python Developer",
+            "company_name": "ACME",
+            "original_url": "https://example.com/jobs/123",
+            "publication_date": timezone.now(),
+            "description": "Build Django applications",
+        }
+
+    def test_duplicate_external_id_for_same_source_is_rejected(self):
+        Job.objects.create(source=self.source, external_id="123", **self.data)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Job.objects.create(
+                    source=self.source, external_id="123", **self.data
+                )
+        self.assertEqual(Job.objects.count(), 1)
+
+    def test_same_external_id_for_different_sources_is_allowed(self):
+        other_source = Source.objects.create(
+            name="Other Source", website="https://other.example.com/"
+        )
+        first = Job.objects.create(
+            source=self.source, external_id="123", **self.data
+        )
+        second = Job.objects.create(
+            source=other_source, external_id="123", **self.data
+        )
+        self.assertNotEqual(first.pk, second.pk)
+        self.assertEqual(Job.objects.count(), 2)
+
+    def test_repeated_import_updates_existing_job(self):
+        job, created = save_imported_job(self.source, "1", self.data)
+        self.assertTrue(created)
+        self.data["title"] = "Senior Python Developer"
+        updated_job, created = save_imported_job(self.source, "1", self.data)
+        self.assertFalse(created)
+        self.assertEqual(job.pk, updated_job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.title, "Senior Python Developer")
+        self.assertEqual(Job.objects.count(), 1)
+
+    def test_missing_external_id_is_rejected_without_creating_jobs(self):
+        for external_id in (None, "", "   "):
+            with self.subTest(external_id=external_id):
+                with self.assertRaisesMessage(ValueError, "external_id is required"):
+                    save_imported_job(self.source, external_id, self.data)
+                self.assertEqual(Job.objects.count(), 0)
+
+    def test_numeric_and_string_ids_update_same_job(self):
+        job, created = save_imported_job(self.source, 123, self.data)
+        self.assertTrue(created)
+        self.data["title"] = "Updated title"
+        updated_job, created = save_imported_job(self.source, "123", self.data)
+        self.assertFalse(created)
+        self.assertEqual(job.pk, updated_job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.external_id, "123")
+        self.assertEqual(job.title, "Updated title")
+        self.assertEqual(Job.objects.count(), 1)
+
+    def test_zero_external_id_is_valid(self):
+        job, created = save_imported_job(self.source, 0, self.data)
+        self.assertTrue(created)
+        job.refresh_from_db()
+        self.assertEqual(job.external_id, "0")
+        self.assertEqual(Job.objects.count(), 1)
+
+    def test_external_id_whitespace_is_trimmed(self):
+        job, created = save_imported_job(self.source, " 123 ", self.data)
+        self.assertTrue(created)
+        job.refresh_from_db()
+        self.assertEqual(job.external_id, "123")

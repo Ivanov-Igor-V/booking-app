@@ -29,6 +29,20 @@ class Job(models.Model):
         null=True,
         blank=True,
     )
+    external_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_id"],
+                name="unique_job_per_source",
+            ),
+        ]
+
     objects = models.Manager()
 
     def __str__(self) -> str:
