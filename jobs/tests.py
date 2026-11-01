@@ -1,11 +1,14 @@
+import json
 from datetime import timedelta
+from pathlib import Path
 
 from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
+from .adapters import normalize_remotive_job
 from .models import Job, Source
 from .services import save_imported_job
 
@@ -265,21 +268,15 @@ class ImportedJobTests(TestCase):
         Job.objects.create(source=self.source, external_id="123", **self.data)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
-                Job.objects.create(
-                    source=self.source, external_id="123", **self.data
-                )
+                Job.objects.create(source=self.source, external_id="123", **self.data)
         self.assertEqual(Job.objects.count(), 1)
 
     def test_same_external_id_for_different_sources_is_allowed(self):
         other_source = Source.objects.create(
             name="Other Source", website="https://other.example.com/"
         )
-        first = Job.objects.create(
-            source=self.source, external_id="123", **self.data
-        )
-        second = Job.objects.create(
-            source=other_source, external_id="123", **self.data
-        )
+        first = Job.objects.create(source=self.source, external_id="123", **self.data)
+        second = Job.objects.create(source=other_source, external_id="123", **self.data)
         self.assertNotEqual(first.pk, second.pk)
         self.assertEqual(Job.objects.count(), 2)
 
@@ -325,3 +322,71 @@ class ImportedJobTests(TestCase):
         self.assertTrue(created)
         job.refresh_from_db()
         self.assertEqual(job.external_id, "123")
+
+
+class RemotiveDataTests(SimpleTestCase):
+    def setUp(self):
+        path = Path(__file__).resolve().parent / "test_data" / "remotive_job.json"
+        with open(path, "r", encoding="utf-8") as f:
+            self.vacancy = json.load(f)
+
+    def test_mock_vacancy(self):
+        job = self.vacancy
+        self.assertEqual(job["id"], 123)
+        self.assertEqual(job["title"], "Python Developer")
+        self.assertIn("<p>", job["description"])
+
+    def test_adapter_strips_spaces(self):
+        raw_job = self.vacancy
+
+        for field, result_field in (
+            ("title", "title"),
+            ("company_name", "company_name"),
+            ("url", "original_url"),
+        ):
+            with self.subTest(field=field):
+                padded_job = raw_job.copy()
+                padded_job[field] = f"  {raw_job[field]}  "
+                original = padded_job.copy()
+                external_id, data = normalize_remotive_job(padded_job)
+                self.assertEqual(data[result_field], raw_job[field])
+                self.assertEqual(padded_job, original)
+
+    def test_adapter_rejects_missing_required_fields(self):
+        original_job = self.vacancy
+
+        for field in ("title", "company_name", "url"):
+            with self.subTest(field=field):
+                raw_job = original_job.copy()
+                del raw_job[field]
+                before = raw_job.copy()
+                with self.assertRaisesMessage(ValueError, field):
+                    normalize_remotive_job(raw_job)
+                self.assertEqual(raw_job, before)
+
+    def test_adapter_rejects_invalid_required_fields(self):
+        original_job = self.vacancy
+
+        for field in ("title", "company_name", "url"):
+            for value in (None, 123, "", "   "):
+                with self.subTest(field=field, value=value):
+                    raw_job = original_job.copy()
+                    raw_job[field] = value
+                    before = raw_job.copy()
+                    with self.assertRaisesMessage(ValueError, field):
+                        normalize_remotive_job(raw_job)
+                    self.assertEqual(raw_job, before)
+
+    def test_adapter_works(self):
+        raw_job = self.vacancy
+
+        external_id, data = normalize_remotive_job(raw_job)
+        self.assertEqual(external_id, "123")
+        self.assertEqual(data["title"], "Python Developer")
+        self.assertEqual(data["company_name"], raw_job["company_name"])
+        self.assertEqual(data["original_url"], raw_job["url"])
+        self.assertEqual(data["publication_date"], raw_job["publication_date"])
+        self.assertEqual(data["description"], raw_job["description"])
+        self.assertNotIn("url", data)
+        self.assertNotIn("id", data)
+        self.assertNotIn("external_id", data)
