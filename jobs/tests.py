@@ -1,5 +1,6 @@
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import timezone as datetime_timezone
 from pathlib import Path
 
 from django.db import IntegrityError, transaction
@@ -8,7 +9,7 @@ from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .adapters import normalize_remotive_job
+from .adapters import normalize_remotive_job, parse_publication_date
 from .models import Job, Source
 from .services import save_imported_job
 
@@ -377,6 +378,50 @@ class RemotiveDataTests(SimpleTestCase):
                         normalize_remotive_job(raw_job)
                     self.assertEqual(raw_job, before)
 
+    def test_missing_description_becomes_empty_string(self):
+        raw_job = self.vacancy.copy()
+        del raw_job["description"]
+        before = raw_job.copy()
+
+        _, data = normalize_remotive_job(raw_job)
+
+        self.assertEqual(data["description"], "")
+        self.assertEqual(raw_job, before)
+
+    def test_none_description_becomes_empty_string(self):
+        raw_job = self.vacancy.copy()
+        raw_job["description"] = None
+        before = raw_job.copy()
+
+        _, data = normalize_remotive_job(raw_job)
+
+        self.assertEqual(data["description"], "")
+        self.assertEqual(raw_job, before)
+
+    def test_string_description_is_preserved(self):
+        for description in ("", "   ", "  First line\nSecond line  ", self.vacancy["description"]):
+            with self.subTest(description=description):
+                raw_job = self.vacancy.copy()
+                raw_job["description"] = description
+                before = raw_job.copy()
+
+                _, data = normalize_remotive_job(raw_job)
+
+                self.assertEqual(data["description"], description)
+                self.assertEqual(raw_job, before)
+
+    def test_invalid_description_is_rejected(self):
+        for description in (123, [], {}):
+            with self.subTest(description=description):
+                raw_job = self.vacancy.copy()
+                raw_job["description"] = description
+                before = raw_job.copy()
+
+                with self.assertRaisesMessage(ValueError, "description"):
+                    normalize_remotive_job(raw_job)
+
+                self.assertEqual(raw_job, before)
+
     def test_adapter_works(self):
         raw_job = self.vacancy
 
@@ -390,3 +435,45 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertNotIn("url", data)
         self.assertNotIn("id", data)
         self.assertNotIn("external_id", data)
+
+
+class PublicationDateTests(SimpleTestCase):
+    def test_date_with_utc_offset(self):
+        result = parse_publication_date("2026-09-18T16:43:22+00:00")
+        expected = datetime(2026, 9, 18, 16, 43, 22, tzinfo=datetime_timezone.utc)
+
+        self.assertEqual(result, expected)
+        self.assertIsNotNone(result.utcoffset())
+
+    def test_different_offsets_represent_same_instant(self):
+        utc_date = parse_publication_date("2026-09-18T16:43:22+00:00")
+        offset_date = parse_publication_date("2026-09-18T19:43:22+03:00")
+
+        self.assertEqual(utc_date, offset_date)
+
+    def test_date_without_timezone_is_rejected(self):
+        with self.assertRaisesMessage(ValueError, "must include a timezone"):
+            parse_publication_date("2026-09-18T16:43:22")
+
+    def test_invalid_values_are_rejected(self):
+        for value in (None, 123, "", "   ", "not-a-date"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_publication_date(value)
+
+    def test_naive_date_uses_explicit_source_timezone(self):
+        result = parse_publication_date(
+            "2026-09-18T16:43:22", source_timezone=datetime_timezone.utc
+        )
+        expected = datetime(2026, 9, 18, 16, 43, 22, tzinfo=datetime_timezone.utc)
+
+        self.assertEqual(result, expected)
+        self.assertEqual(result.utcoffset(), timedelta(0))
+
+    def test_existing_offset_is_not_overridden(self):
+        result = parse_publication_date(
+            "2026-09-18T19:43:22+03:00", source_timezone=datetime_timezone.utc
+        )
+
+        self.assertEqual(result.utcoffset(), timedelta(hours=3))
+        self.assertEqual((result.hour, result.minute, result.second), (19, 43, 22))
