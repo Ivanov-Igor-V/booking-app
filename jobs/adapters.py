@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from .html_utils import description_to_text
+
 
 def parse_publication_date(value, *, source_timezone=None):
     if not isinstance(value, str):
@@ -47,7 +49,7 @@ def normalize_remotive_job(raw_job):
         "company_name": require_text(raw_job, "company_name"),
         "original_url": require_text(raw_job, "url"),
         "publication_date": raw_job["publication_date"],
-        "description": optional_text(raw_job, "description"),
+        "description": description_to_text(optional_text(raw_job, "description")),
     }
 
     return external_id, data

@@ -10,8 +10,54 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .adapters import normalize_remotive_job, parse_publication_date
+from .html_utils import description_to_text
 from .models import Job, Source
 from .services import save_imported_job
+
+
+class DescriptionToTextTests(SimpleTestCase):
+    def test_list_items_are_separated_by_newline(self):
+        self.assertEqual(
+            description_to_text("<ul><li>Python</li><li>Django</li></ul>"),
+            "Python\nDjango",
+        )
+
+    def test_script_content_is_ignored(self):
+        self.assertEqual(
+            description_to_text("<p>Hello</p><script>alert(1)</script><p>World</p>"),
+            "Hello\nWorld",
+        )
+
+    def test_style_content_is_ignored(self):
+        self.assertEqual(
+            description_to_text("<style>p { color: red; }</style><p>Hello</p>"),
+            "Hello",
+        )
+
+    def test_inline_tags_preserve_text_spacing(self):
+        self.assertEqual(
+            description_to_text("<p>Use <strong>Python</strong> daily.</p>"),
+            "Use Python daily.",
+        )
+
+    def test_paragraphs_are_separated_by_newline(self):
+        self.assertEqual(
+            description_to_text("<p>First</p><p>Second</p>"), "First\nSecond"
+        )
+
+    def test_br_becomes_newline(self):
+        self.assertEqual(description_to_text("First<br>Second"), "First\nSecond")
+
+    def test_html_entities_are_decoded(self):
+        self.assertEqual(
+            description_to_text("<p>Python &amp; Django</p>"), "Python & Django"
+        )
+
+    def test_plain_text_is_preserved(self):
+        self.assertEqual(description_to_text("Plain text"), "Plain text")
+
+    def test_empty_string(self):
+        self.assertEqual(description_to_text(""), "")
 
 
 class JobSearchTests(TestCase):
@@ -398,8 +444,13 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual(data["description"], "")
         self.assertEqual(raw_job, before)
 
-    def test_string_description_is_preserved(self):
-        for description in ("", "   ", "  First line\nSecond line  ", self.vacancy["description"]):
+    def test_description_is_converted_to_plain_text(self):
+        for description, expected in (
+            ("", ""),
+            ("   ", ""),
+            ("  First line\nSecond line  ", "First line\nSecond line"),
+            (self.vacancy["description"], "Build Django applications.\nWrite tests."),
+        ):
             with self.subTest(description=description):
                 raw_job = self.vacancy.copy()
                 raw_job["description"] = description
@@ -407,7 +458,7 @@ class RemotiveDataTests(SimpleTestCase):
 
                 _, data = normalize_remotive_job(raw_job)
 
-                self.assertEqual(data["description"], description)
+                self.assertEqual(data["description"], expected)
                 self.assertEqual(raw_job, before)
 
     def test_invalid_description_is_rejected(self):
@@ -424,6 +475,7 @@ class RemotiveDataTests(SimpleTestCase):
 
     def test_adapter_works(self):
         raw_job = self.vacancy
+        before = raw_job.copy()
 
         external_id, data = normalize_remotive_job(raw_job)
         self.assertEqual(external_id, "123")
@@ -431,10 +483,24 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual(data["company_name"], raw_job["company_name"])
         self.assertEqual(data["original_url"], raw_job["url"])
         self.assertEqual(data["publication_date"], raw_job["publication_date"])
-        self.assertEqual(data["description"], raw_job["description"])
+        self.assertEqual(
+            data["description"],
+            "Build Django applications.\nWrite tests.",
+        )
         self.assertNotIn("url", data)
         self.assertNotIn("id", data)
         self.assertNotIn("external_id", data)
+        self.assertEqual(raw_job, before)
+
+    def test_adapter_removes_script_content(self):
+        raw_job = self.vacancy.copy()
+        raw_job["description"] = "<p>Hello</p><script>alert(1)</script>"
+        before = raw_job.copy()
+
+        _, data = normalize_remotive_job(raw_job)
+
+        self.assertEqual(data["description"], "Hello")
+        self.assertEqual(raw_job, before)
 
 
 class PublicationDateTests(SimpleTestCase):
