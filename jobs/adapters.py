@@ -41,14 +41,17 @@ def require_text(raw_job, field):
     return value
 
 
-def normalize_remotive_job(raw_job):
+def normalize_remotive_job(raw_job, *, source_timezone=None):
     external_id = str(raw_job["id"])
 
     data = {
         "title": require_text(raw_job, "title"),
         "company_name": require_text(raw_job, "company_name"),
         "original_url": require_text(raw_job, "url"),
-        "publication_date": raw_job["publication_date"],
+        "publication_date": parse_publication_date(
+            raw_job.get("publication_date"),
+            source_timezone=source_timezone,
+        ),
         "description": description_to_text(optional_text(raw_job, "description")),
     }
 

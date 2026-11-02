@@ -395,7 +395,9 @@ class RemotiveDataTests(SimpleTestCase):
                 padded_job = raw_job.copy()
                 padded_job[field] = f"  {raw_job[field]}  "
                 original = padded_job.copy()
-                external_id, data = normalize_remotive_job(padded_job)
+                external_id, data = normalize_remotive_job(
+                    padded_job, source_timezone=datetime_timezone.utc
+                )
                 self.assertEqual(data[result_field], raw_job[field])
                 self.assertEqual(padded_job, original)
 
@@ -408,7 +410,9 @@ class RemotiveDataTests(SimpleTestCase):
                 del raw_job[field]
                 before = raw_job.copy()
                 with self.assertRaisesMessage(ValueError, field):
-                    normalize_remotive_job(raw_job)
+                    normalize_remotive_job(
+                        raw_job, source_timezone=datetime_timezone.utc
+                    )
                 self.assertEqual(raw_job, before)
 
     def test_adapter_rejects_invalid_required_fields(self):
@@ -421,7 +425,9 @@ class RemotiveDataTests(SimpleTestCase):
                     raw_job[field] = value
                     before = raw_job.copy()
                     with self.assertRaisesMessage(ValueError, field):
-                        normalize_remotive_job(raw_job)
+                        normalize_remotive_job(
+                            raw_job, source_timezone=datetime_timezone.utc
+                        )
                     self.assertEqual(raw_job, before)
 
     def test_missing_description_becomes_empty_string(self):
@@ -429,7 +435,7 @@ class RemotiveDataTests(SimpleTestCase):
         del raw_job["description"]
         before = raw_job.copy()
 
-        _, data = normalize_remotive_job(raw_job)
+        _, data = normalize_remotive_job(raw_job, source_timezone=datetime_timezone.utc)
 
         self.assertEqual(data["description"], "")
         self.assertEqual(raw_job, before)
@@ -439,7 +445,7 @@ class RemotiveDataTests(SimpleTestCase):
         raw_job["description"] = None
         before = raw_job.copy()
 
-        _, data = normalize_remotive_job(raw_job)
+        _, data = normalize_remotive_job(raw_job, source_timezone=datetime_timezone.utc)
 
         self.assertEqual(data["description"], "")
         self.assertEqual(raw_job, before)
@@ -456,7 +462,9 @@ class RemotiveDataTests(SimpleTestCase):
                 raw_job["description"] = description
                 before = raw_job.copy()
 
-                _, data = normalize_remotive_job(raw_job)
+                _, data = normalize_remotive_job(
+                    raw_job, source_timezone=datetime_timezone.utc
+                )
 
                 self.assertEqual(data["description"], expected)
                 self.assertEqual(raw_job, before)
@@ -469,7 +477,9 @@ class RemotiveDataTests(SimpleTestCase):
                 before = raw_job.copy()
 
                 with self.assertRaisesMessage(ValueError, "description"):
-                    normalize_remotive_job(raw_job)
+                    normalize_remotive_job(
+                        raw_job, source_timezone=datetime_timezone.utc
+                    )
 
                 self.assertEqual(raw_job, before)
 
@@ -477,12 +487,18 @@ class RemotiveDataTests(SimpleTestCase):
         raw_job = self.vacancy
         before = raw_job.copy()
 
-        external_id, data = normalize_remotive_job(raw_job)
+        external_id, data = normalize_remotive_job(
+            raw_job,
+            source_timezone=datetime_timezone.utc,
+        )
         self.assertEqual(external_id, "123")
         self.assertEqual(data["title"], "Python Developer")
         self.assertEqual(data["company_name"], raw_job["company_name"])
         self.assertEqual(data["original_url"], raw_job["url"])
-        self.assertEqual(data["publication_date"], raw_job["publication_date"])
+        self.assertEqual(
+            data["publication_date"],
+            datetime(2026, 9, 18, 16, 43, 22, tzinfo=datetime_timezone.utc),
+        )
         self.assertEqual(
             data["description"],
             "Build Django applications.\nWrite tests.",
@@ -497,18 +513,47 @@ class RemotiveDataTests(SimpleTestCase):
         raw_job["description"] = "<p>Hello</p><script>alert(1)</script>"
         before = raw_job.copy()
 
-        _, data = normalize_remotive_job(raw_job)
+        _, data = normalize_remotive_job(raw_job, source_timezone=datetime_timezone.utc)
 
         self.assertEqual(data["description"], "Hello")
         self.assertEqual(raw_job, before)
+
+    def test_adapter_rejects_date_without_timezone(self):
+        raw_job = self.vacancy.copy()
+        raw_job["date"] = "2026-09-18T16:43:22"
+        with self.assertRaisesMessage(ValueError, "must include a timezone"):
+            normalize_remotive_job(raw_job)
+
+    def test_adapter_preserves_explicit_timezone(self):
+        raw_job = self.vacancy.copy()
+        raw_job["publication_date"] = "2026-09-18T19:43:22+03:00"
+
+        _, data = normalize_remotive_job(
+            raw_job,
+            source_timezone=datetime_timezone.utc,
+        )
+
+        result = data["publication_date"]
+
+        self.assertIsInstance(result, datetime)
+        self.assertEqual(result.utcoffset(), timedelta(hours=3))
+        self.assertEqual((result.hour, result.minute, result.second), (19, 43, 22))
+
+    def test_adapter_rejects_missing_publication_date(self):
+        raw_job = self.vacancy.copy()
+        del raw_job["publication_date"]
+        with self.assertRaisesMessage(ValueError, "publication_date must be a string"):
+            normalize_remotive_job(raw_job)
 
 
 class PublicationDateTests(SimpleTestCase):
     def test_date_with_utc_offset(self):
         result = parse_publication_date("2026-09-18T16:43:22+00:00")
-        expected = datetime(2026, 9, 18, 16, 43, 22, tzinfo=datetime_timezone.utc)
 
-        self.assertEqual(result, expected)
+        self.assertEqual(
+            result,
+            datetime(2026, 9, 18, 16, 43, 22, tzinfo=datetime_timezone.utc),
+        )
         self.assertIsNotNone(result.utcoffset())
 
     def test_different_offsets_represent_same_instant(self):
@@ -543,3 +588,60 @@ class PublicationDateTests(SimpleTestCase):
 
         self.assertEqual(result.utcoffset(), timedelta(hours=3))
         self.assertEqual((result.hour, result.minute, result.second), (19, 43, 22))
+
+
+class RemotiveImportTests(TestCase):
+    def setUp(self):
+        self.source = Source.objects.create(
+            name="Test Source",
+            website="https://example.com/",
+        )
+
+        path = Path(__file__).resolve().parent / "test_data" / "remotive_job.json"
+        with open(path, encoding="utf-8") as file:
+            self.raw_job = json.load(file)
+
+    def test_imports_job_from_json(self):
+        external_id, data = normalize_remotive_job(
+            self.raw_job,
+            source_timezone=datetime_timezone.utc,
+        )
+        job, created = save_imported_job(
+            self.source,
+            external_id,
+            data,
+        )
+        job.refresh_from_db()
+        self.assertTrue(created)
+        self.assertEqual(Job.objects.count(), 1)
+        self.assertEqual(job.source, self.source)
+        self.assertEqual(job.external_id, "123")
+
+    def test_reimport_updates_existing_job(self):
+        external_id, data = normalize_remotive_job(
+            self.raw_job,
+            source_timezone=datetime_timezone.utc,
+        )
+        original_job, created = save_imported_job(self.source, external_id, data)
+        self.assertTrue(created)
+
+        updated_raw_job = self.raw_job.copy()
+        updated_raw_job["title"] = "Senior Python Developer"
+        updated_raw_job["description"] = "<p>Build APIs.</p><p>Review code.</p>"
+
+        external_id, updated_data = normalize_remotive_job(
+            updated_raw_job,
+            source_timezone=datetime_timezone.utc,
+        )
+        saved_job, created_again = save_imported_job(
+            self.source, external_id, updated_data
+        )
+
+        self.assertFalse(created_again)
+        self.assertEqual(original_job.pk, saved_job.pk)
+
+        original_job.refresh_from_db()
+
+        self.assertEqual(original_job.title, "Senior Python Developer")
+        self.assertEqual(original_job.description, "Build APIs.\nReview code.")
+        self.assertEqual(Job.objects.count(), 1)
