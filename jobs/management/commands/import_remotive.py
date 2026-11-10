@@ -1,11 +1,12 @@
 import json
+from datetime import timezone as datetime_timezone
 from pathlib import Path
 
-import datetime_timezone
 from django.core.management.base import BaseCommand, CommandError
 
 from jobs.adapters import normalize_remotive_job
 from jobs.models import Job, Source
+from jobs.services import save_imported_job
 
 
 class Command(BaseCommand):
@@ -35,7 +36,16 @@ class Command(BaseCommand):
         except ValueError as error:
             raise CommandError(str(error)) from error
 
-        self.stdout.write(f"{external_id}: {data['title']} — {data['company_name']}")
+        custom_source, _ = Source.objects.get_or_create(
+            name="Remotive",
+            defaults={"website": "https://remotive.com/"},
+        )
+        job, created = save_imported_job(custom_source, external_id, data)
+        message = f"Created: {job.title}"
+        if not created:
+            message = f"Updated: {job.title}"
+
+        self.stdout.write(message)
 
         count = Job.objects.count()
         count_of_sources = Source.objects.count()

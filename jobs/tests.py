@@ -7,7 +7,6 @@ from tempfile import TemporaryDirectory
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-
 from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 from django.test import SimpleTestCase, TestCase
@@ -25,20 +24,83 @@ class ImportRemotiveCommandTests(TestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "vacancy.json"
+        fixture_path = Path(__file__).parent / "test_data" / "remotive_job.json"
+        self.vacancy = json.loads(fixture_path.read_text(encoding="utf-8"))
 
     def run_command(self):
         output = StringIO()
         call_command("import_remotive", str(self.path), stdout=output)
         return output.getvalue()
 
-    def test_reads_title_without_creating_records(self):
-        self.path.write_text(
-            json.dumps({"title": "  Python Developer  "}), encoding="utf-8"
-        )
+    def test_import_creates_normalized_job_and_source(self):
+        self.vacancy["title"] = "  Python Developer  "
+        self.vacancy["company_name"] = "  Example Company  "
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
         output = self.run_command()
-        self.assertEqual(output.splitlines().count("Python Developer"), 1)
-        self.assertEqual(Job.objects.count(), 0)
-        self.assertEqual(Source.objects.count(), 0)
+        self.assertEqual(
+            output.splitlines(),
+            [
+                f"Reading: {self.path}",
+                "Created: Python Developer",
+                "Jobs currently stored: 1, with 1 sources",
+            ],
+        )
+        job = Job.objects.get()
+        source = Source.objects.get()
+        self.assertEqual(source.name, "Remotive")
+        self.assertEqual(source.website, "https://remotive.com/")
+        self.assertEqual(job.source, source)
+        self.assertEqual(job.external_id, "123")
+        self.assertEqual(job.title, "Python Developer")
+        self.assertEqual(job.company_name, "Example Company")
+        self.assertEqual(job.original_url, self.vacancy["url"])
+        self.assertEqual(job.description, "Build Django applications.\nWrite tests.")
+        self.assertEqual(
+            job.publication_date,
+            datetime(2026, 9, 18, 16, 43, 22, tzinfo=datetime_timezone.utc),
+        )
+
+    def test_reimport_does_not_create_duplicates(self):
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
+        self.run_command()
+        original_job = Job.objects.get()
+        original_source = Source.objects.get()
+
+        output = self.run_command()
+
+        self.assertEqual(Job.objects.get().pk, original_job.pk)
+        self.assertEqual(Source.objects.get().pk, original_source.pk)
+        self.assertIn("Updated: Python Developer", output.splitlines())
+        self.assertIn("Jobs currently stored: 1, with 1 sources", output.splitlines())
+
+    def test_reimport_updates_existing_job(self):
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
+        self.run_command()
+        job = Job.objects.get()
+        source_id = job.source_id
+        self.vacancy["title"] = "  Senior Python Developer  "
+        self.vacancy["description"] = "<p>Build APIs.</p><p>Review code.</p>"
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
+
+        output = self.run_command()
+
+        job.refresh_from_db()
+        self.assertEqual(Job.objects.get().pk, job.pk)
+        self.assertEqual(Source.objects.get().pk, source_id)
+        self.assertEqual(job.title, "Senior Python Developer")
+        self.assertEqual(job.description, "Build APIs.\nReview code.")
+        self.assertIn("Updated: Senior Python Developer", output.splitlines())
+
+    def test_import_reuses_source_by_unique_name(self):
+        source = Source.objects.create(
+            name="Remotive", website="https://remotive.com"
+        )
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
+
+        self.run_command()
+
+        self.assertEqual(Source.objects.get().pk, source.pk)
+        self.assertEqual(Job.objects.get().source_id, source.pk)
 
     def test_missing_file(self):
         with self.assertRaisesMessage(CommandError, "File not found"):
@@ -65,9 +127,30 @@ class ImportRemotiveCommandTests(TestCase):
             {"title": "   "},
         ):
             with self.subTest(value=value):
-                self.path.write_text(json.dumps(value), encoding="utf-8")
+                vacancy = self.vacancy.copy()
+                del vacancy["title"]
+                vacancy.update(value)
+                self.path.write_text(json.dumps(vacancy), encoding="utf-8")
                 with self.assertRaisesMessage(CommandError, "title"):
                     self.run_command()
+
+    def test_normalization_errors_preserve_message_and_cause(self):
+        for field, value, message in (
+            ("company_name", "   ", "company_name is required"),
+            ("url", None, "url must be a string"),
+            ("publication_date", None, "publication_date must be a string"),
+        ):
+            with self.subTest(field=field):
+                vacancy = self.vacancy.copy()
+                vacancy[field] = value
+                self.path.write_text(json.dumps(vacancy), encoding="utf-8")
+                with self.assertRaisesMessage(CommandError, message) as caught:
+                    self.run_command()
+                self.assertIsInstance(caught.exception.__cause__, ValueError)
+                self.assertEqual(str(caught.exception), message)
+                self.assertEqual(str(caught.exception.__cause__), message)
+        self.assertEqual(Job.objects.count(), 0)
+        self.assertEqual(Source.objects.count(), 0)
 
     def test_invalid_encoding(self):
         self.path.write_bytes(b"\xff")
