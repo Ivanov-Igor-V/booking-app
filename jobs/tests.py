@@ -1,7 +1,12 @@
 import json
 from datetime import datetime, timedelta
 from datetime import timezone as datetime_timezone
+from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
@@ -13,6 +18,66 @@ from .adapters import normalize_remotive_job, parse_publication_date
 from .html_utils import description_to_text
 from .models import Job, Source
 from .services import save_imported_job
+
+
+class ImportRemotiveCommandTests(TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "vacancy.json"
+
+    def run_command(self):
+        output = StringIO()
+        call_command("import_remotive", str(self.path), stdout=output)
+        return output.getvalue()
+
+    def test_reads_title_without_creating_records(self):
+        self.path.write_text(
+            json.dumps({"title": "  Python Developer  "}), encoding="utf-8"
+        )
+        output = self.run_command()
+        self.assertEqual(output.splitlines().count("Python Developer"), 1)
+        self.assertEqual(Job.objects.count(), 0)
+        self.assertEqual(Source.objects.count(), 0)
+
+    def test_missing_file(self):
+        with self.assertRaisesMessage(CommandError, "File not found"):
+            self.run_command()
+
+    def test_invalid_json(self):
+        self.path.write_text("hello", encoding="utf-8")
+        with self.assertRaisesMessage(CommandError, "Invalid JSON"):
+            self.run_command()
+
+    def test_non_object_json(self):
+        for value in ([], None, 123, "text"):
+            with self.subTest(value=value):
+                self.path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesMessage(CommandError, "Expected a JSON object"):
+                    self.run_command()
+
+    def test_invalid_title(self):
+        for value in (
+            {},
+            {"title": None},
+            {"title": 123},
+            {"title": ""},
+            {"title": "   "},
+        ):
+            with self.subTest(value=value):
+                self.path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesMessage(CommandError, "title"):
+                    self.run_command()
+
+    def test_invalid_encoding(self):
+        self.path.write_bytes(b"\xff")
+        with self.assertRaisesMessage(CommandError, "UTF-8"):
+            self.run_command()
+
+    def test_directory_instead_of_file(self):
+        self.path.mkdir()
+        with self.assertRaisesMessage(CommandError, "Cannot read file"):
+            self.run_command()
 
 
 class DescriptionToTextTests(SimpleTestCase):

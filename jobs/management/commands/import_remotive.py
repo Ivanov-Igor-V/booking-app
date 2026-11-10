@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
-from django.core.management.base import BaseCommand
+import datetime_timezone
+from django.core.management.base import BaseCommand, CommandError
 
+from jobs.adapters import normalize_remotive_job
 from jobs.models import Job, Source
 
 
@@ -12,10 +14,29 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         path = options["path"]
         self.stdout.write(f"Reading: {path}")
-        with open(path, encoding="utf-8") as f:
-            vacancy = json.load(f)
-            print(vacancy["title"])
-        self.stdout.write(vacancy["title"])
+        try:
+            with open(path, encoding="utf-8") as f:
+                vacancy = json.load(f)
+        except FileNotFoundError as error:
+            raise CommandError(f"File not found: {path}") from error
+        except json.JSONDecodeError as error:
+            raise CommandError(f"Invalid JSON: {path}") from error
+        except UnicodeDecodeError as error:
+            raise CommandError(f"File must use UTF-8: {path}") from error
+        except OSError as error:
+            raise CommandError(f"Cannot read file: {path}") from error
+        if not isinstance(vacancy, dict):
+            raise CommandError("Expected a JSON object")
+        try:
+            external_id, data = normalize_remotive_job(
+                vacancy,
+                source_timezone=datetime_timezone.utc,
+            )
+        except ValueError as error:
+            raise CommandError(str(error)) from error
+
+        self.stdout.write(f"{external_id}: {data['title']} — {data['company_name']}")
+
         count = Job.objects.count()
         count_of_sources = Source.objects.count()
         self.stdout.write(
