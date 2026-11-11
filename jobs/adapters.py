@@ -42,7 +42,12 @@ def require_text(raw_job, field):
 
 
 def normalize_remotive_job(raw_job, *, source_timezone=None):
-    external_id = str(raw_job["id"])
+    value = raw_job.get("id")
+    if value is None:
+        raise ValueError("id is required")
+    external_id = str(value).strip()
+    if not external_id:
+        raise ValueError("id is required")
 
     data = {
         "title": require_text(raw_job, "title"),

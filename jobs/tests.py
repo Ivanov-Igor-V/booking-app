@@ -92,15 +92,35 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertIn("Updated: Senior Python Developer", output.splitlines())
 
     def test_import_reuses_source_by_unique_name(self):
-        source = Source.objects.create(
-            name="Remotive", website="https://remotive.com"
-        )
+        source = Source.objects.create(name="Remotive", website="https://remotive.com")
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
 
         self.run_command()
 
         self.assertEqual(Source.objects.get().pk, source.pk)
         self.assertEqual(Job.objects.get().source_id, source.pk)
+
+    def test_invalid_id_does_not_create_records(self):
+        invalid_fields = [
+            {},
+            {"id": None},
+            {"id": ""},
+            {"id": " "},
+            {"id": "  "},
+            {"id": "   "},
+            {"id": "\t\n"},
+        ]
+        for fields in invalid_fields:
+            with self.subTest(fields=fields):
+                vacancy = self.vacancy.copy()
+                del vacancy["id"]
+                vacancy.update(fields)
+                self.path.write_text(json.dumps(vacancy), encoding="utf-8")
+                with self.assertRaisesMessage(CommandError, "id is required") as caught:
+                    self.run_command()
+                self.assertIsInstance(caught.exception.__cause__, ValueError)
+                self.assertEqual(Job.objects.count(), 0)
+                self.assertEqual(Source.objects.count(), 0)
 
     def test_missing_file(self):
         with self.assertRaisesMessage(CommandError, "File not found"):
@@ -525,6 +545,18 @@ class RemotiveDataTests(SimpleTestCase):
         with open(path, "r", encoding="utf-8") as f:
             self.vacancy = json.load(f)
 
+    def test_adapter_normalizes_id(self):
+        for value, expected in ((123, "123"), (0, "0"), (" \t123\n", "123")):
+            with self.subTest(value=value):
+                vacancy = self.vacancy.copy()
+                vacancy["id"] = value
+                before = vacancy.copy()
+                external_id, _ = normalize_remotive_job(
+                    vacancy, source_timezone=datetime_timezone.utc
+                )
+                self.assertEqual(external_id, expected)
+                self.assertEqual(vacancy, before)
+
     def test_mock_vacancy(self):
         job = self.vacancy
         self.assertEqual(job["id"], 123)
@@ -748,6 +780,17 @@ class RemotiveImportTests(TestCase):
         path = Path(__file__).resolve().parent / "test_data" / "remotive_job.json"
         with open(path, encoding="utf-8") as file:
             self.raw_job = json.load(file)
+
+    def test_wrong_id(self):
+        job = self.vacancy
+        for value in [None, "", "   "]:
+            with self.subTest(field=value):
+                job = self.vacancy.copy()
+                job["id"] = value
+                self.path.write_text(json.dumps(job), encoding="utf-8")
+
+                with self.assertRaisesMessage(CommandError, "Wrong id"):
+                    self.run_command()
 
     def test_imports_job_from_json(self):
         external_id, data = normalize_remotive_job(
