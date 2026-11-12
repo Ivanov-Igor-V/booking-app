@@ -1082,3 +1082,50 @@ class RemotiveClientTests(SimpleTestCase):
         mocked_urlopen.assert_called_once()
         self.assertEqual(str(caught.exception), "Remotive returned HTTP 503")
         self.assertIs(caught.exception.__cause__, original_error)
+
+    def test_missing_jobs_field(self):
+        response = BytesIO(json.dumps({}).encode("utf-8"))
+        with patch(
+            "jobs.remotive_client.urlopen",
+            return_value=response,
+        ) as mocked_urlopen:
+            with self.assertRaisesMessage(
+                RemotiveAPIError, "Expected a jobs list from Remotive"
+            ) as caught:
+                fetch_remotive_jobs()
+
+        mocked_urlopen.assert_called_once()
+
+        self.assertEqual(str(caught.exception), "Expected a jobs list from Remotive")
+
+    def test_invalid_response_structure(self):
+        for payload, expected_message in [
+            ([], "Expected a JSON object from Remotive"),
+            ({"jobs": {}}, "Expected a jobs list from Remotive"),
+            ({"jobs": "string"}, "Expected a jobs list from Remotive"),
+            ({"jobs": None}, "Expected a jobs list from Remotive"),
+        ]:
+            with self.subTest(payload=payload):
+                response = BytesIO(json.dumps(payload).encode("utf-8"))
+                with patch(
+                    "jobs.remotive_client.urlopen",
+                    return_value=response,
+                ) as mocked_urlopen:
+                    with self.assertRaisesMessage(
+                        RemotiveAPIError, expected_message
+                    ) as caught:
+                        fetch_remotive_jobs()
+
+                mocked_urlopen.assert_called_once()
+                self.assertEqual(str(caught.exception), expected_message)
+
+    def test_empty_jobs_list(self):
+        response = BytesIO(b'{"jobs": []}')
+        with patch(
+            "jobs.remotive_client.urlopen",
+            return_value=response,
+        ) as mocked_urlopen:
+            jobs = fetch_remotive_jobs()
+
+        mocked_urlopen.assert_called_once()
+        self.assertEqual(jobs, [])
