@@ -36,7 +36,7 @@ class Command(BaseCommand):
 
         for number, raw_job in enumerate(vacancies, start=1):
             if not isinstance(raw_job, dict):
-                raise CommandError("Expected a JSON object")
+                raise CommandError(f"Vacancy {number}: expected a JSON object")
             try:
                 external_id, data = normalize_remotive_job(
                     raw_job,

@@ -98,6 +98,84 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Source.objects.get().pk, source.pk)
         self.assertEqual(Job.objects.get().source_id, source.pk)
 
+    def test_import_and_reimport_list(self):
+        second = {**self.vacancy, "id": 456, "title": "Backend Developer"}
+        self.path.write_text(json.dumps([self.vacancy, second]), encoding="utf-8")
+
+        output = self.run_command()
+
+        self.assertIn("Created: 2, updated: 0", output.splitlines())
+        self.assertEqual(Source.objects.count(), 1)
+        self.assertEqual(
+            dict(Job.objects.values_list("external_id", "title")),
+            {"123": "Python Developer", "456": "Backend Developer"},
+        )
+        original_ids = dict(Job.objects.values_list("external_id", "pk"))
+        source_id = Source.objects.get().pk
+
+        second["title"] = "Senior Backend Developer"
+        self.path.write_text(json.dumps([self.vacancy, second]), encoding="utf-8")
+        output = self.run_command()
+
+        self.assertIn("Created: 0, updated: 2", output.splitlines())
+        self.assertEqual(
+            dict(Job.objects.values_list("external_id", "pk")), original_ids
+        )
+        self.assertEqual(Source.objects.get().pk, source_id)
+        self.assertEqual(
+            Job.objects.get(external_id="456").title, "Senior Backend Developer"
+        )
+
+    def test_list_counts_created_and_updated_separately(self):
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
+        self.run_command()
+        second = {**self.vacancy, "id": 456}
+        self.path.write_text(json.dumps([self.vacancy, second]), encoding="utf-8")
+
+        output = self.run_command()
+
+        self.assertIn("Created: 1, updated: 1", output.splitlines())
+        self.assertEqual(Job.objects.count(), 2)
+        self.assertEqual(Source.objects.count(), 1)
+
+    def test_empty_list_does_not_create_source(self):
+        self.path.write_text("[]", encoding="utf-8")
+
+        output = self.run_command()
+
+        self.assertIn("Created: 0, updated: 0", output.splitlines())
+        self.assertEqual(Job.objects.count(), 0)
+        self.assertEqual(Source.objects.count(), 0)
+
+    def test_invalid_second_vacancy_prevents_all_writes(self):
+        for second, message in (
+            ({**self.vacancy, "id": None}, "Vacancy 2: id is required"),
+            (123, "Vacancy 2: expected a JSON object"),
+        ):
+            with self.subTest(second=second):
+                self.path.write_text(
+                    json.dumps([self.vacancy, second]), encoding="utf-8"
+                )
+                with self.assertRaisesMessage(CommandError, message):
+                    self.run_command()
+                self.assertEqual(Job.objects.count(), 0)
+                self.assertEqual(Source.objects.count(), 0)
+
+    def test_invalid_list_does_not_update_existing_job(self):
+        self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
+        self.run_command()
+        job = Job.objects.get()
+        changed = {**self.vacancy, "title": "Should not be saved"}
+        self.path.write_text(json.dumps([changed, {}]), encoding="utf-8")
+
+        with self.assertRaisesMessage(CommandError, "Vacancy 2: id is required"):
+            self.run_command()
+
+        job.refresh_from_db()
+        self.assertEqual(job.title, self.vacancy["title"])
+        self.assertEqual(Job.objects.count(), 1)
+        self.assertEqual(Source.objects.count(), 1)
+
     def test_invalid_id_does_not_create_records(self):
         invalid_fields = [
             {},
