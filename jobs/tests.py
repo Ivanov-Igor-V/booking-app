@@ -1,9 +1,11 @@
 import json
 from datetime import datetime, timedelta
 from datetime import timezone as datetime_timezone
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -16,6 +18,7 @@ from django.utils import timezone
 from .adapters import normalize_remotive_job, parse_publication_date
 from .html_utils import description_to_text
 from .models import Job, Source
+from .remotive_client import RemotiveAPIError, fetch_remotive_jobs
 from .services import save_imported_job
 
 
@@ -33,6 +36,7 @@ class ImportRemotiveCommandTests(TestCase):
         return output.getvalue()
 
     def test_import_creates_normalized_job_and_source(self):
+        # Проверяет создание источника и вакансии с нормализованными полями через команду.
         self.vacancy["title"] = "  Python Developer  "
         self.vacancy["company_name"] = "  Example Company  "
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
@@ -60,6 +64,7 @@ class ImportRemotiveCommandTests(TestCase):
         )
 
     def test_reimport_does_not_create_duplicates(self):
+        # Проверяет, что повторный импорт сохраняет прежние записи вакансии и источника.
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
         self.run_command()
         original_job = Job.objects.get()
@@ -72,6 +77,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertIn("Created: 0, updated: 1", output.splitlines())
 
     def test_reimport_updates_existing_job(self):
+        # Проверяет обновление названия и описания прежней вакансии без создания дубликата.
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
         self.run_command()
         job = Job.objects.get()
@@ -90,6 +96,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertIn("Created: 0, updated: 1", output.splitlines())
 
     def test_import_reuses_source_by_unique_name(self):
+        # Проверяет использование существующего источника Remotive с тем же именем.
         source = Source.objects.create(name="Remotive", website="https://remotive.com")
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
 
@@ -99,6 +106,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Job.objects.get().source_id, source.pk)
 
     def test_import_and_reimport_list(self):
+        # Проверяет импорт списка и обновление его вакансий с сохранением прежних ID записей.
         second = {**self.vacancy, "id": 456, "title": "Backend Developer"}
         self.path.write_text(json.dumps([self.vacancy, second]), encoding="utf-8")
 
@@ -127,6 +135,7 @@ class ImportRemotiveCommandTests(TestCase):
         )
 
     def test_list_counts_created_and_updated_separately(self):
+        # Проверяет отдельный подсчёт созданных и обновлённых вакансий при импорте списка.
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
         self.run_command()
         second = {**self.vacancy, "id": 456}
@@ -139,6 +148,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Source.objects.count(), 1)
 
     def test_empty_list_does_not_create_source(self):
+        # Проверяет нулевой результат импорта пустого списка без создания записей.
         self.path.write_text("[]", encoding="utf-8")
 
         output = self.run_command()
@@ -148,6 +158,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Source.objects.count(), 0)
 
     def test_invalid_second_vacancy_prevents_all_writes(self):
+        # Проверяет, что неправильная вторая вакансия предотвращает сохранение всего списка.
         for second, message in (
             ({**self.vacancy, "id": None}, "Vacancy 2: id is required"),
             (123, "Vacancy 2: expected a JSON object"),
@@ -162,6 +173,7 @@ class ImportRemotiveCommandTests(TestCase):
                 self.assertEqual(Source.objects.count(), 0)
 
     def test_invalid_list_does_not_update_existing_job(self):
+        # Проверяет, что ошибка в списке оставляет существующую вакансию без изменений.
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
         self.run_command()
         job = Job.objects.get()
@@ -177,6 +189,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Source.objects.count(), 1)
 
     def test_invalid_id_does_not_create_records(self):
+        # Проверяет отклонение отсутствующего или пустого ID без создания вакансий и источников.
         invalid_fields = [
             {},
             {"id": None},
@@ -199,15 +212,18 @@ class ImportRemotiveCommandTests(TestCase):
                 self.assertEqual(Source.objects.count(), 0)
 
     def test_missing_file(self):
+        # Проверяет понятную ошибку команды при отсутствии файла.
         with self.assertRaisesMessage(CommandError, "File not found"):
             self.run_command()
 
     def test_invalid_json(self):
+        # Проверяет ошибку команды при некорректном содержимом JSON.
         self.path.write_text("hello", encoding="utf-8")
         with self.assertRaisesMessage(CommandError, "Invalid JSON"):
             self.run_command()
 
     def test_non_object_json(self):
+        # Проверяет отклонение JSON, который не является объектом или списком.
         for value in (None, 123, "text"):
             with self.subTest(value=value):
                 self.path.write_text(json.dumps(value), encoding="utf-8")
@@ -215,6 +231,7 @@ class ImportRemotiveCommandTests(TestCase):
                     self.run_command()
 
     def test_invalid_title(self):
+        # Проверяет отклонение отсутствующего, пустого или нестрокового названия вакансии.
         for value in (
             {},
             {"title": None},
@@ -231,6 +248,7 @@ class ImportRemotiveCommandTests(TestCase):
                     self.run_command()
 
     def test_normalization_errors_preserve_message_and_cause(self):
+        # Проверяет сохранение текста и причины ошибки нормализации без записи в базу.
         for field, value, message in (
             ("company_name", "   ", "company_name is required"),
             ("url", None, "url must be a string"),
@@ -249,11 +267,13 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Source.objects.count(), 0)
 
     def test_invalid_encoding(self):
+        # Проверяет ошибку команды при чтении файла с недопустимыми байтами UTF-8.
         self.path.write_bytes(b"\xff")
         with self.assertRaisesMessage(CommandError, "UTF-8"):
             self.run_command()
 
     def test_directory_instead_of_file(self):
+        # Проверяет ошибку чтения, если вместо файла указана папка.
         self.path.mkdir()
         with self.assertRaisesMessage(CommandError, "Cannot read file"):
             self.run_command()
@@ -261,46 +281,55 @@ class ImportRemotiveCommandTests(TestCase):
 
 class DescriptionToTextTests(SimpleTestCase):
     def test_list_items_are_separated_by_newline(self):
+        # Проверяет разделение элементов HTML-списка переносами строк.
         self.assertEqual(
             description_to_text("<ul><li>Python</li><li>Django</li></ul>"),
             "Python\nDjango",
         )
 
     def test_script_content_is_ignored(self):
+        # Проверяет удаление тегов script вместе с их содержимым из описания.
         self.assertEqual(
             description_to_text("<p>Hello</p><script>alert(1)</script><p>World</p>"),
             "Hello\nWorld",
         )
 
     def test_style_content_is_ignored(self):
+        # Проверяет удаление тегов style вместе с их содержимым из описания.
         self.assertEqual(
             description_to_text("<style>p { color: red; }</style><p>Hello</p>"),
             "Hello",
         )
 
     def test_inline_tags_preserve_text_spacing(self):
+        # Проверяет сохранение пробелов между словами после удаления строчных HTML-тегов.
         self.assertEqual(
             description_to_text("<p>Use <strong>Python</strong> daily.</p>"),
             "Use Python daily.",
         )
 
     def test_paragraphs_are_separated_by_newline(self):
+        # Проверяет разделение HTML-абзацев переносами строк.
         self.assertEqual(
             description_to_text("<p>First</p><p>Second</p>"), "First\nSecond"
         )
 
     def test_br_becomes_newline(self):
+        # Проверяет преобразование тега br в перенос строки.
         self.assertEqual(description_to_text("First<br>Second"), "First\nSecond")
 
     def test_html_entities_are_decoded(self):
+        # Проверяет преобразование HTML-сущностей в обычные символы.
         self.assertEqual(
             description_to_text("<p>Python &amp; Django</p>"), "Python & Django"
         )
 
     def test_plain_text_is_preserved(self):
+        # Проверяет сохранение обычного текста без HTML без изменений.
         self.assertEqual(description_to_text("Plain text"), "Plain text")
 
     def test_empty_string(self):
+        # Проверяет, что обработка пустого описания возвращает пустую строку.
         self.assertEqual(description_to_text(""), "")
 
 
@@ -328,6 +357,7 @@ class JobSearchTests(TestCase):
         )
 
     def test_title_search_preserves_order_without_duplicates(self):
+        # Проверяет поиск по названию без учёта регистра и крайних пробелов с сохранением порядка.
         for keyword in ("python", "PYTHON", "  python  "):
             with self.subTest(keyword=keyword):
                 response = self.client.get(reverse("job_list"), {"q": keyword})
@@ -339,11 +369,13 @@ class JobSearchTests(TestCase):
                 self.assertNotContains(response, "Java Developer")
 
     def test_search_by_company(self):
+        # Проверяет поиск вакансий по названию компании без учёта регистра.
         response = self.client.get(reverse("job_list"), {"q": "acme"})
         self.assertEqual(list(response.context["jobs"]), [self.older])
         self.assertContains(response, "Python Developer")
 
     def test_missing_or_blank_query_returns_all_jobs_across_pages(self):
+        # Проверяет показ всех вакансий по страницам при отсутствующем или пустом запросе.
         for params in ({}, {"q": ""}, {"q": "   "}):
             with self.subTest(params=params):
                 response = self.client.get(reverse("job_list"), params)
@@ -358,6 +390,7 @@ class JobSearchTests(TestCase):
                 self.assertEqual(list(second_page.context["jobs"]), [self.older])
 
     def test_no_matches(self):
+        # Проверяет пустой результат и сообщение, если поиск не нашёл вакансий.
         response = self.client.get(reverse("job_list"), {"q": "rust"})
         self.assertEqual(list(response.context["jobs"]), [])
         self.assertContains(response, "No jobs found")
@@ -376,6 +409,7 @@ class JobPaginationTests(TestCase):
             )
 
     def test_first_page_contains_two_jobs(self):
+        # Проверяет две вакансии на первой странице и общее количество найденных записей.
         response = self.client.get(reverse("job_list"))
 
         self.assertEqual(response.status_code, 200)
@@ -384,6 +418,7 @@ class JobPaginationTests(TestCase):
         self.assertContains(response, "Всего 3 вакансий")
 
     def test_second_page_contains_remaining_job_without_overlap(self):
+        # Проверяет показ оставшейся вакансии на второй странице без повторов с первой.
         first = self.client.get(reverse("job_list"))
         second = self.client.get(reverse("job_list"), {"page": 2})
         self.assertEqual(second.status_code, 200)
@@ -397,18 +432,21 @@ class JobPaginationTests(TestCase):
         self.assertEqual(second.context["jobs"][0].title, "Python Developer 1")
 
     def test_non_numeric_page_returns_first_page(self):
+        # Проверяет показ первой страницы при нечисловом параметре page.
         response = self.client.get(reverse("job_list"), {"page": "abc"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["page_obj"].number, 1)
         self.assertEqual(len(response.context["jobs"]), 2)
 
     def test_no_matches_returns_empty_page(self):
+        # Проверяет корректную пустую страницу при отсутствии результатов поиска.
         response = self.client.get(reverse("job_list"), {"q": "nonexistent"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["page_obj"].paginator.count, 0)
         self.assertContains(response, "No jobs found")
 
     def test_search_is_preserved_in_page_links(self):
+        # Проверяет сохранение поискового запроса в ссылках перехода между страницами.
         first = self.client.get(reverse("job_list"), {"q": "Python Developer"})
         self.assertContains(first, "?q=Python%20Developer&amp;page=2")
         second = self.client.get(
@@ -429,6 +467,7 @@ class JobDetailTests(TestCase):
         )
 
     def test_existing_job_returns_200(self):
+        # Проверяет успешное открытие вакансии, используемые шаблоны и заголовки страницы.
         response = self.client.get(reverse("job_detail", args=[self.job.pk]))
 
         self.assertEqual(response.status_code, 200)
@@ -440,6 +479,7 @@ class JobDetailTests(TestCase):
         )
 
     def test_link_to_vac_is_proper(self):
+        # Проверяет наличие ссылки на оригинальное объявление на странице вакансии.
         response = self.client.get(reverse("job_detail", args=[self.job.pk]))
 
         self.assertContains(
@@ -448,6 +488,7 @@ class JobDetailTests(TestCase):
         )
 
     def test_vac_do_not_exist(self):
+        # Проверяет ответ 404 при запросе отсутствующей вакансии.
         missing_pk = self.job.pk + 1
 
         response = self.client.get(reverse("job_detail", args=[missing_pk]))
@@ -455,6 +496,7 @@ class JobDetailTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_description_escapes_html(self):
+        # Проверяет экранирование HTML в описании при отображении страницы вакансии.
         self.job.description = "<script>alert('test')</script>"
         self.job.save()
 
@@ -465,11 +507,13 @@ class JobDetailTests(TestCase):
         self.assertNotContains(response, "<script>")
 
     def test_empty_description_shows_placeholder(self):
+        # Проверяет сообщение об отсутствии описания на странице вакансии.
         response = self.client.get(reverse("job_detail", args=[self.job.pk]))
 
         self.assertContains(response, "No description available")
 
     def test_description_preserves_line_breaks(self):
+        # Проверяет отображение переносов строк описания через HTML-теги br.
         self.job.description = "First line\nSecond line"
         self.job.save()
 
@@ -481,6 +525,7 @@ class JobDetailTests(TestCase):
 
 class SouceTests(TestCase):
     def test_source_cannot_remove(self):
+        # Проверяет запрет удаления источника, с которым связана вакансия.
         source = Source.objects.create(
             name="Test Source",
             website="https://example.com/",
@@ -497,6 +542,7 @@ class SouceTests(TestCase):
             source.delete()
 
     def test_source_removes_if_not_used(self):
+        # Проверяет удаление источника, у которого нет вакансий.
         source = Source.objects.create(
             name="Test Source",
             website="https://example.com/",
@@ -506,6 +552,7 @@ class SouceTests(TestCase):
         self.assertFalse(Source.objects.filter(pk=id).exists())
 
     def test_source_len_of_vacs(self):
+        # Проверяет набор вакансий каждого источника и связь вакансии с её источником.
         source = Source.objects.create(
             name="Test Source 1",
             website="https://example.com/",
@@ -556,6 +603,7 @@ class ImportedJobTests(TestCase):
         }
 
     def test_duplicate_external_id_for_same_source_is_rejected(self):
+        # Проверяет запрет одинакового внешнего ID у двух вакансий одного источника.
         Job.objects.create(source=self.source, external_id="123", **self.data)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
@@ -563,6 +611,7 @@ class ImportedJobTests(TestCase):
         self.assertEqual(Job.objects.count(), 1)
 
     def test_same_external_id_for_different_sources_is_allowed(self):
+        # Проверяет возможность одинакового внешнего ID у вакансий разных источников.
         other_source = Source.objects.create(
             name="Other Source", website="https://other.example.com/"
         )
@@ -572,6 +621,7 @@ class ImportedJobTests(TestCase):
         self.assertEqual(Job.objects.count(), 2)
 
     def test_repeated_import_updates_existing_job(self):
+        # Проверяет обновление прежней вакансии функцией сохранения без создания дубликата.
         job, created = save_imported_job(self.source, "1", self.data)
         self.assertTrue(created)
         self.data["title"] = "Senior Python Developer"
@@ -583,6 +633,7 @@ class ImportedJobTests(TestCase):
         self.assertEqual(Job.objects.count(), 1)
 
     def test_missing_external_id_is_rejected_without_creating_jobs(self):
+        # Проверяет отклонение пустого внешнего ID функцией сохранения без записи в базу.
         for external_id in (None, "", "   "):
             with self.subTest(external_id=external_id):
                 with self.assertRaisesMessage(ValueError, "external_id is required"):
@@ -590,6 +641,7 @@ class ImportedJobTests(TestCase):
                 self.assertEqual(Job.objects.count(), 0)
 
     def test_numeric_and_string_ids_update_same_job(self):
+        # Проверяет, что числовой ID и его строковая запись определяют одну вакансию.
         job, created = save_imported_job(self.source, 123, self.data)
         self.assertTrue(created)
         self.data["title"] = "Updated title"
@@ -602,6 +654,7 @@ class ImportedJobTests(TestCase):
         self.assertEqual(Job.objects.count(), 1)
 
     def test_zero_external_id_is_valid(self):
+        # Проверяет сохранение вакансии с допустимым внешним ID, равным нулю.
         job, created = save_imported_job(self.source, 0, self.data)
         self.assertTrue(created)
         job.refresh_from_db()
@@ -609,6 +662,7 @@ class ImportedJobTests(TestCase):
         self.assertEqual(Job.objects.count(), 1)
 
     def test_external_id_whitespace_is_trimmed(self):
+        # Проверяет удаление крайних пробелов из внешнего ID при сохранении.
         job, created = save_imported_job(self.source, " 123 ", self.data)
         self.assertTrue(created)
         job.refresh_from_db()
@@ -622,6 +676,7 @@ class RemotiveDataTests(SimpleTestCase):
             self.vacancy = json.load(f)
 
     def test_adapter_normalizes_id(self):
+        # Проверяет преобразование ID в очищенную строку без изменения входного словаря.
         for value, expected in ((123, "123"), (0, "0"), (" \t123\n", "123")):
             with self.subTest(value=value):
                 vacancy = self.vacancy.copy()
@@ -634,12 +689,14 @@ class RemotiveDataTests(SimpleTestCase):
                 self.assertEqual(vacancy, before)
 
     def test_mock_vacancy(self):
+        # Проверяет ожидаемые ID, название и HTML-описание в тестовом JSON-примере.
         job = self.vacancy
         self.assertEqual(job["id"], 123)
         self.assertEqual(job["title"], "Python Developer")
         self.assertIn("<p>", job["description"])
 
     def test_adapter_strips_spaces(self):
+        # Проверяет удаление крайних пробелов из обязательных полей без изменения входных данных.
         raw_job = self.vacancy
 
         for field, result_field in (
@@ -658,6 +715,7 @@ class RemotiveDataTests(SimpleTestCase):
                 self.assertEqual(padded_job, original)
 
     def test_adapter_rejects_missing_required_fields(self):
+        # Проверяет отказ при отсутствии обязательных полей без изменения исходного словаря.
         original_job = self.vacancy
 
         for field in ("title", "company_name", "url"):
@@ -672,6 +730,7 @@ class RemotiveDataTests(SimpleTestCase):
                 self.assertEqual(raw_job, before)
 
     def test_adapter_rejects_invalid_required_fields(self):
+        # Проверяет отказ при неправильных обязательных полях без изменения исходных данных.
         original_job = self.vacancy
 
         for field in ("title", "company_name", "url"):
@@ -687,6 +746,7 @@ class RemotiveDataTests(SimpleTestCase):
                     self.assertEqual(raw_job, before)
 
     def test_missing_description_becomes_empty_string(self):
+        # Проверяет замену отсутствующего описания пустой строкой без изменения исходных данных.
         raw_job = self.vacancy.copy()
         del raw_job["description"]
         before = raw_job.copy()
@@ -697,6 +757,7 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual(raw_job, before)
 
     def test_none_description_becomes_empty_string(self):
+        # Проверяет преобразование описания None в пустую строку без изменения исходных данных.
         raw_job = self.vacancy.copy()
         raw_job["description"] = None
         before = raw_job.copy()
@@ -707,6 +768,7 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual(raw_job, before)
 
     def test_description_is_converted_to_plain_text(self):
+        # Проверяет очистку описания и преобразование HTML в текст без изменения исходных данных.
         for description, expected in (
             ("", ""),
             ("   ", ""),
@@ -726,6 +788,7 @@ class RemotiveDataTests(SimpleTestCase):
                 self.assertEqual(raw_job, before)
 
     def test_invalid_description_is_rejected(self):
+        # Проверяет отклонение нестрокового описания без изменения исходной вакансии.
         for description in (123, [], {}):
             with self.subTest(description=description):
                 raw_job = self.vacancy.copy()
@@ -740,6 +803,7 @@ class RemotiveDataTests(SimpleTestCase):
                 self.assertEqual(raw_job, before)
 
     def test_adapter_works(self):
+        # Проверяет нормализацию полей вакансии, даты и описания без изменения исходного словаря.
         raw_job = self.vacancy
         before = raw_job.copy()
 
@@ -765,6 +829,7 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual(raw_job, before)
 
     def test_adapter_removes_script_content(self):
+        # Проверяет удаление содержимого script нормализатором без изменения исходной вакансии.
         raw_job = self.vacancy.copy()
         raw_job["description"] = "<p>Hello</p><script>alert(1)</script>"
         before = raw_job.copy()
@@ -775,12 +840,14 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual(raw_job, before)
 
     def test_adapter_rejects_date_without_timezone(self):
+        # Проверяет отказ нормализатора при дате без часового пояса и без заданного пояса источника.
         raw_job = self.vacancy.copy()
         raw_job["date"] = "2026-09-18T16:43:22"
         with self.assertRaisesMessage(ValueError, "must include a timezone"):
             normalize_remotive_job(raw_job)
 
     def test_adapter_preserves_explicit_timezone(self):
+        # Проверяет сохранение указанного в дате часового пояса при нормализации вакансии.
         raw_job = self.vacancy.copy()
         raw_job["publication_date"] = "2026-09-18T19:43:22+03:00"
 
@@ -796,6 +863,7 @@ class RemotiveDataTests(SimpleTestCase):
         self.assertEqual((result.hour, result.minute, result.second), (19, 43, 22))
 
     def test_adapter_rejects_missing_publication_date(self):
+        # Проверяет отказ нормализатора при отсутствии даты публикации.
         raw_job = self.vacancy.copy()
         del raw_job["publication_date"]
         with self.assertRaisesMessage(ValueError, "publication_date must be a string"):
@@ -804,6 +872,7 @@ class RemotiveDataTests(SimpleTestCase):
 
 class PublicationDateTests(SimpleTestCase):
     def test_date_with_utc_offset(self):
+        # Проверяет преобразование строки даты с UTC-смещением в datetime с часовым поясом.
         result = parse_publication_date("2026-09-18T16:43:22+00:00")
 
         self.assertEqual(
@@ -813,22 +882,26 @@ class PublicationDateTests(SimpleTestCase):
         self.assertIsNotNone(result.utcoffset())
 
     def test_different_offsets_represent_same_instant(self):
+        # Проверяет равенство дат с разными смещениями, обозначающих один момент времени.
         utc_date = parse_publication_date("2026-09-18T16:43:22+00:00")
         offset_date = parse_publication_date("2026-09-18T19:43:22+03:00")
 
         self.assertEqual(utc_date, offset_date)
 
     def test_date_without_timezone_is_rejected(self):
+        # Проверяет отказ при дате без часового пояса, если пояс источника не задан.
         with self.assertRaisesMessage(ValueError, "must include a timezone"):
             parse_publication_date("2026-09-18T16:43:22")
 
     def test_invalid_values_are_rejected(self):
+        # Проверяет отклонение пустых, нестроковых и некорректных значений даты.
         for value in (None, 123, "", "   ", "not-a-date"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     parse_publication_date(value)
 
     def test_naive_date_uses_explicit_source_timezone(self):
+        # Проверяет назначение заданного пояса источника дате без собственного часового пояса.
         result = parse_publication_date(
             "2026-09-18T16:43:22", source_timezone=datetime_timezone.utc
         )
@@ -838,6 +911,7 @@ class PublicationDateTests(SimpleTestCase):
         self.assertEqual(result.utcoffset(), timedelta(0))
 
     def test_existing_offset_is_not_overridden(self):
+        # Проверяет, что пояс источника не заменяет уже указанное в дате смещение.
         result = parse_publication_date(
             "2026-09-18T19:43:22+03:00", source_timezone=datetime_timezone.utc
         )
@@ -858,6 +932,7 @@ class RemotiveImportTests(TestCase):
             self.raw_job = json.load(file)
 
     def test_wrong_id(self):
+        # Проверяет отказ нормализатора при ID, равном None, пустой строке или пробелам.
         for value in [None, "", "   "]:
             with self.subTest(value=value):
                 job = self.raw_job.copy()
@@ -870,6 +945,7 @@ class RemotiveImportTests(TestCase):
                     )
 
     def test_imports_job_from_json(self):
+        # Проверяет создание вакансии из JSON через нормализацию и сохранение с нужным источником.
         external_id, data = normalize_remotive_job(
             self.raw_job,
             source_timezone=datetime_timezone.utc,
@@ -886,6 +962,7 @@ class RemotiveImportTests(TestCase):
         self.assertEqual(job.external_id, "123")
 
     def test_reimport_updates_existing_job(self):
+        # Проверяет обновление названия и описания прежней вакансии без создания дубликата.
         external_id, data = normalize_remotive_job(
             self.raw_job,
             source_timezone=datetime_timezone.utc,
@@ -913,3 +990,95 @@ class RemotiveImportTests(TestCase):
         self.assertEqual(original_job.title, "Senior Python Developer")
         self.assertEqual(original_job.description, "Build APIs.\nReview code.")
         self.assertEqual(Job.objects.count(), 1)
+
+
+class RemotiveClientTests(SimpleTestCase):
+    def test_returns_jobs(self):
+        payload = {"jobs": [{"id": 123, "title": "Python Developer"}]}
+        response = BytesIO(json.dumps(payload).encode("utf-8"))
+
+        with patch(
+            "jobs.remotive_client.urlopen",
+            return_value=response,
+        ) as mocked_urlopen:
+            jobs = fetch_remotive_jobs()
+
+        self.assertEqual(jobs, payload["jobs"])
+        mocked_urlopen.assert_called_once()
+
+        args, kwargs = mocked_urlopen.call_args
+        request = args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://remotive.com/api/remote-jobs?category=software-dev",
+        )
+        self.assertEqual(kwargs["timeout"], 15)
+
+    def test_connection_error(self):
+        original_error = URLError("Connection refused")
+
+        with patch(
+            "jobs.remotive_client.urlopen",
+            side_effect=original_error,
+        ) as mocked_urlopen:
+            with self.assertRaisesMessage(
+                RemotiveAPIError,
+                "Cannot connect to Remotive",
+            ) as caught:
+                fetch_remotive_jobs()
+
+        mocked_urlopen.assert_called_once()
+        self.assertIs(caught.exception.__cause__, original_error)
+
+    def test_timeout_error(self):
+        original_error = TimeoutError()
+
+        with patch(
+            "jobs.remotive_client.urlopen",
+            side_effect=original_error,
+        ) as mocked_urlopen:
+            with self.assertRaisesMessage(
+                RemotiveAPIError,
+                "Remotive request timed out",
+            ) as caught:
+                fetch_remotive_jobs()
+
+        mocked_urlopen.assert_called_once()
+        self.assertIs(caught.exception.__cause__, original_error)
+
+    def test_invalid_json(self):
+        response = BytesIO(b"not valid json")
+
+        with patch(
+            "jobs.remotive_client.urlopen",
+            return_value=response,
+        ):
+            with self.assertRaisesMessage(
+                RemotiveAPIError,
+                "Remotive returned invalid JSON",
+            ) as caught:
+                fetch_remotive_jobs()
+
+        self.assertIsInstance(caught.exception.__cause__, json.JSONDecodeError)
+
+    def test_503_error(self):
+        original_error = HTTPError(
+            url="https://example.com/api",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=None,
+        )
+
+        with patch(
+            "jobs.remotive_client.urlopen",
+            side_effect=original_error,
+        ) as mocked_urlopen:
+            with self.assertRaisesMessage(
+                RemotiveAPIError, "Remotive returned HTTP 503"
+            ) as caught:
+                fetch_remotive_jobs()
+
+        mocked_urlopen.assert_called_once()
+        self.assertEqual(str(caught.exception), "Remotive returned HTTP 503")
+        self.assertIs(caught.exception.__cause__, original_error)
