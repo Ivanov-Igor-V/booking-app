@@ -5,7 +5,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 
 from jobs.adapters import normalize_remotive_job
-from jobs.models import Job, Source
+from jobs.models import Source
 from jobs.services import save_imported_job
 
 
@@ -26,32 +26,43 @@ class Command(BaseCommand):
             raise CommandError(f"File must use UTF-8: {path}") from error
         except OSError as error:
             raise CommandError(f"Cannot read file: {path}") from error
-        if not isinstance(vacancy, dict):
-            raise CommandError("Expected a JSON object")
-        try:
-            external_id, data = normalize_remotive_job(
-                vacancy,
-                source_timezone=datetime_timezone.utc,
+        if isinstance(vacancy, dict):
+            vacancies = [vacancy]
+        elif isinstance(vacancy, list):
+            vacancies = vacancy
+        else:
+            raise CommandError("Expected a JSON object or list")
+        normalized_jobs = []
+
+        for number, raw_job in enumerate(vacancies, start=1):
+            if not isinstance(raw_job, dict):
+                raise CommandError("Expected a JSON object")
+            try:
+                external_id, data = normalize_remotive_job(
+                    raw_job,
+                    source_timezone=datetime_timezone.utc,
+                )
+            except ValueError as error:
+                raise CommandError(f"Vacancy {number}: {error}") from error
+
+            normalized_jobs.append((external_id, data))
+        created_count = 0
+        updated_count = 0
+        if normalized_jobs:
+            source, _ = Source.objects.get_or_create(
+                name="Remotive",
+                defaults={"website": "https://remotive.com/"},
             )
-        except ValueError as error:
-            raise CommandError(str(error)) from error
 
-        custom_source, _ = Source.objects.get_or_create(
-            name="Remotive",
-            defaults={"website": "https://remotive.com/"},
-        )
-        job, created = save_imported_job(custom_source, external_id, data)
-        message = f"Created: {job.title}"
-        if not created:
-            message = f"Updated: {job.title}"
+            for external_id, data in normalized_jobs:
+                job, created = save_imported_job(source, external_id, data)
 
-        self.stdout.write(message)
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
 
-        count = Job.objects.count()
-        count_of_sources = Source.objects.count()
-        self.stdout.write(
-            f"Jobs currently stored: {count}, with {count_of_sources} sources"
-        )
+        self.stdout.write(f"Created: {created_count}, updated: {updated_count}")
 
     def add_arguments(self, parser):
         parser.add_argument(

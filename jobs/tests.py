@@ -41,8 +41,7 @@ class ImportRemotiveCommandTests(TestCase):
             output.splitlines(),
             [
                 f"Reading: {self.path}",
-                "Created: Python Developer",
-                "Jobs currently stored: 1, with 1 sources",
+                "Created: 1, updated: 0",
             ],
         )
         job = Job.objects.get()
@@ -70,8 +69,7 @@ class ImportRemotiveCommandTests(TestCase):
 
         self.assertEqual(Job.objects.get().pk, original_job.pk)
         self.assertEqual(Source.objects.get().pk, original_source.pk)
-        self.assertIn("Updated: Python Developer", output.splitlines())
-        self.assertIn("Jobs currently stored: 1, with 1 sources", output.splitlines())
+        self.assertIn("Created: 0, updated: 1", output.splitlines())
 
     def test_reimport_updates_existing_job(self):
         self.path.write_text(json.dumps(self.vacancy), encoding="utf-8")
@@ -89,7 +87,7 @@ class ImportRemotiveCommandTests(TestCase):
         self.assertEqual(Source.objects.get().pk, source_id)
         self.assertEqual(job.title, "Senior Python Developer")
         self.assertEqual(job.description, "Build APIs.\nReview code.")
-        self.assertIn("Updated: Senior Python Developer", output.splitlines())
+        self.assertIn("Created: 0, updated: 1", output.splitlines())
 
     def test_import_reuses_source_by_unique_name(self):
         source = Source.objects.create(name="Remotive", website="https://remotive.com")
@@ -132,7 +130,7 @@ class ImportRemotiveCommandTests(TestCase):
             self.run_command()
 
     def test_non_object_json(self):
-        for value in ([], None, 123, "text"):
+        for value in (None, 123, "text"):
             with self.subTest(value=value):
                 self.path.write_text(json.dumps(value), encoding="utf-8")
                 with self.assertRaisesMessage(CommandError, "Expected a JSON object"):
@@ -167,7 +165,7 @@ class ImportRemotiveCommandTests(TestCase):
                 with self.assertRaisesMessage(CommandError, message) as caught:
                     self.run_command()
                 self.assertIsInstance(caught.exception.__cause__, ValueError)
-                self.assertEqual(str(caught.exception), message)
+                self.assertEqual(str(caught.exception), f"Vacancy 1: {message}")
                 self.assertEqual(str(caught.exception.__cause__), message)
         self.assertEqual(Job.objects.count(), 0)
         self.assertEqual(Source.objects.count(), 0)
@@ -782,15 +780,16 @@ class RemotiveImportTests(TestCase):
             self.raw_job = json.load(file)
 
     def test_wrong_id(self):
-        job = self.vacancy
         for value in [None, "", "   "]:
-            with self.subTest(field=value):
-                job = self.vacancy.copy()
+            with self.subTest(value=value):
+                job = self.raw_job.copy()
                 job["id"] = value
-                self.path.write_text(json.dumps(job), encoding="utf-8")
 
-                with self.assertRaisesMessage(CommandError, "Wrong id"):
-                    self.run_command()
+                with self.assertRaisesMessage(ValueError, "id is required"):
+                    normalize_remotive_job(
+                        job,
+                        source_timezone=datetime_timezone.utc,
+                    )
 
     def test_imports_job_from_json(self):
         external_id, data = normalize_remotive_job(
